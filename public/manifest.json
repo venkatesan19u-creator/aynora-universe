@@ -1,0 +1,32 @@
+{
+  "id": "./",
+  "name": "AYNORA UNIVERSE",
+  "short_name": "AYNORA",
+  "description": "Mobile-first single-admin cosmic publishing platform for serialized Novels, Short Stories, and Poetry with a Reels-style vertical reader.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0D071A",
+  "theme_color": "#160C2E",
+  "icons": [
+    {
+      "src": "./pwa-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "./pwa-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "./pwa-maskable-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "name": "AYNORA UNIVERSE",
+  "description": "Mobile-first single-admin cosmic publishing platform for serialized Novels, Short Stories, and Poetry with a Reels-style vertical reader.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
