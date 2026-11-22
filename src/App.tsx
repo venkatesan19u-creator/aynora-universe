@@ -30,9 +30,9 @@ import {
   seedInitialSupabaseData,
   subscribeToAynoraChanges,
   updateAdminPinInDb,
+  updateEpisodeLikesInDb,
   updateEpisodeRatingInDb,
   updateWorkAndEpisodeInDb,
-  updateWorkLikesInDb,
   updateWriterProfileInDb,
 } from './lib/supabase';
 import {
@@ -143,6 +143,7 @@ export default function App() {
   const [pendingDeleteWork, setPendingDeleteWork] = useState<WorkItem | null>(
     null,
   );
+  const [isWriteOverlayOpen, setIsWriteOverlayOpen] = useState(false);
 
   const {
     isInstalled,
@@ -151,6 +152,8 @@ export default function App() {
     triggerInstall,
   } = usePWAInstall();
 
+  const worksRef = useRef(works);
+  worksRef.current = works;
   const userLikesRef = useRef(userLikes);
   userLikesRef.current = userLikes;
   const userEpRatingsRef = useRef(userEpisodeRatings);
@@ -265,98 +268,174 @@ export default function App() {
 
   // Open Reader and accurately increment views in Supabase
   const handleOpenWork = useCallback((work: WorkItem) => {
-    const nextViews = work.stats.views + 1;
-    setWorks((prev) =>
-      prev.map((w) =>
-        w.id === work.id
-          ? { ...w, stats: { ...w.stats, views: nextViews } }
-          : w,
-      ),
+    const latestWork = worksRef.current.find((w) => w.id === work.id) ?? work;
+    const nextViews = latestWork.stats.views + 1;
+    const nextWorks = worksRef.current.map((w) =>
+      w.id === work.id ? { ...w, stats: { ...w.stats, views: nextViews } } : w,
     );
+    worksRef.current = nextWorks;
+    setWorks(nextWorks);
     setReadingWorkId(work.id);
     void incrementWorkViewsInDb(work.id, nextViews);
   }, []);
 
   const handleToggleLike = useCallback(
-    (workId: string) => {
-      const currentlyLiked = Boolean(userLikes[workId]);
-      const nextLiked = !currentlyLiked;
-      setUserLikes((prev) => ({ ...prev, [workId]: nextLiked }));
+    async (
+      workId: string,
+      episodeId: string,
+    ): Promise<{ ok: boolean; error?: string }> => {
+      const targetWork = worksRef.current.find((w) => w.id === workId);
+      const targetEp = targetWork?.episodes.find((ep) => ep.id === episodeId);
+      if (!targetWork || !targetEp) {
+        return { ok: false, error: 'Episode not found.' };
+      }
 
-      let nextLikes = 0;
-      setWorks((prev) =>
-        prev.map((w) => {
-          if (w.id !== workId) return w;
-          nextLikes = Math.max(0, w.stats.likes + (nextLiked ? 1 : -1));
-          return {
-            ...w,
-            userLiked: nextLiked,
-            stats: { ...w.stats, likes: nextLikes },
-          };
-        }),
+      const prevUserLikes = userLikesRef.current;
+      const currentlyLiked = Boolean(prevUserLikes[episodeId]);
+      const nextLiked = !currentlyLiked;
+      const nextEpLikes = Math.max(
+        0,
+        (targetEp.likes ?? 0) + (nextLiked ? 1 : -1),
       );
-      void updateWorkLikesInDb(workId, nextLikes);
+
+      const nextUserLikes = { ...prevUserLikes, [episodeId]: nextLiked };
+      userLikesRef.current = nextUserLikes;
+      setUserLikes(nextUserLikes);
+
+      const prevWorks = worksRef.current;
+      let nextWorkTotalLikes = 0;
+      const nextWorks = prevWorks.map((w) => {
+        if (w.id !== workId) return w;
+        const updatedEpisodes = w.episodes.map((ep) =>
+          ep.id === episodeId ? { ...ep, likes: nextEpLikes } : ep,
+        );
+        nextWorkTotalLikes = updatedEpisodes.reduce(
+          (acc, ep) => acc + (ep.likes ?? 0),
+          0,
+        );
+        const nextEpLikeMap = {
+          ...(w.userEpisodeLikes ?? {}),
+          [episodeId]: nextLiked,
+        };
+        const anyEpLiked = updatedEpisodes.some((ep) =>
+          Boolean(nextEpLikeMap[ep.id]),
+        );
+        return {
+          ...w,
+          episodes: updatedEpisodes,
+          userLiked: anyEpLiked,
+          userEpisodeLikes: nextEpLikeMap,
+          stats: { ...w.stats, likes: nextWorkTotalLikes },
+        };
+      });
+      worksRef.current = nextWorks;
+      setWorks(nextWorks);
+
+      const allEpisodeLikesMap: Record<string, number> = {};
+      nextWorks.forEach((w) => {
+        w.episodes.forEach((ep) => {
+          allEpisodeLikesMap[ep.id] = ep.likes ?? 0;
+        });
+      });
+
+      const res = await updateEpisodeLikesInDb(
+        episodeId,
+        nextEpLikes,
+        workId,
+        nextWorkTotalLikes,
+        allEpisodeLikesMap,
+      );
+      if (!res.ok) {
+        userLikesRef.current = prevUserLikes;
+        setUserLikes(prevUserLikes);
+        worksRef.current = prevWorks;
+        setWorks(prevWorks);
+        return { ok: false, error: res.error };
+      }
+      return { ok: true };
     },
-    [userLikes],
+    [],
   );
 
   const handleRateEpisode = useCallback(
-    (
+    async (
       workId: string,
       episodeId: string,
       episodeNumber: number,
       stars: number,
-    ) => {
+    ): Promise<{ ok: boolean; error?: string }> => {
+      const targetWork = worksRef.current.find((w) => w.id === workId);
+      const targetEp = targetWork?.episodes.find((ep) => ep.id === episodeId);
+      if (!targetWork || !targetEp) {
+        return { ok: false, error: 'Episode not found.' };
+      }
+
       const ratingKey = `${workId}:${episodeNumber}`;
-      const prevRating = userEpisodeRatings[ratingKey] ?? 0;
+      const prevUserRatings = userEpRatingsRef.current;
+      const prevRating = prevUserRatings[ratingKey] ?? 0;
       const hadPrev = prevRating > 0;
-      setUserEpisodeRatings((prev) => ({ ...prev, [ratingKey]: stars }));
 
-      let nextEpSum = 0;
-      let nextEpCount = 0;
+      const nextEpSum = Math.max(0, targetEp.ratingSum - prevRating + stars);
+      const nextEpCount = hadPrev
+        ? Math.max(1, targetEp.ratingCount)
+        : targetEp.ratingCount + 1;
 
-      setWorks((prev) =>
-        prev.map((w) => {
-          if (w.id !== workId) return w;
-          const updatedEpisodes = w.episodes.map((ep) => {
-            if (ep.id !== episodeId) return ep;
-            nextEpSum = ep.ratingSum - prevRating + stars;
-            nextEpCount = hadPrev ? ep.ratingCount : ep.ratingCount + 1;
-            return {
-              ...ep,
-              ratingSum: nextEpSum,
-              ratingCount: nextEpCount,
-            };
-          });
+      const nextUserRatings = { ...prevUserRatings, [ratingKey]: stars };
+      userEpRatingsRef.current = nextUserRatings;
+      setUserEpisodeRatings(nextUserRatings);
 
-          const totalSum = updatedEpisodes.reduce(
-            (acc, ep) => acc + ep.ratingSum,
-            0,
-          );
-          const totalCount = updatedEpisodes.reduce(
-            (acc, ep) => acc + ep.ratingCount,
-            0,
-          );
+      const prevWorks = worksRef.current;
+      const nextWorks = prevWorks.map((w) => {
+        if (w.id !== workId) return w;
+        const updatedEpisodes = w.episodes.map((ep) =>
+          ep.id === episodeId
+            ? {
+                ...ep,
+                ratingSum: nextEpSum,
+                ratingCount: nextEpCount,
+              }
+            : ep,
+        );
+        const totalSum = updatedEpisodes.reduce(
+          (acc, ep) => acc + ep.ratingSum,
+          0,
+        );
+        const totalCount = updatedEpisodes.reduce(
+          (acc, ep) => acc + ep.ratingCount,
+          0,
+        );
+        return {
+          ...w,
+          episodes: updatedEpisodes,
+          userEpisodeRatings: {
+            ...(w.userEpisodeRatings ?? {}),
+            [episodeNumber]: stars,
+          },
+          stats: {
+            ...w.stats,
+            ratingSum: totalSum,
+            ratingCount: totalCount,
+          },
+        };
+      });
+      worksRef.current = nextWorks;
+      setWorks(nextWorks);
 
-          return {
-            ...w,
-            episodes: updatedEpisodes,
-            userEpisodeRatings: {
-              ...(w.userEpisodeRatings ?? {}),
-              [episodeNumber]: stars,
-            },
-            stats: {
-              ...w.stats,
-              ratingSum: totalSum,
-              ratingCount: totalCount,
-            },
-          };
-        }),
+      const res = await updateEpisodeRatingInDb(
+        episodeId,
+        nextEpSum,
+        nextEpCount,
       );
-
-      void updateEpisodeRatingInDb(episodeId, nextEpSum, nextEpCount);
+      if (!res.ok) {
+        userEpRatingsRef.current = prevUserRatings;
+        setUserEpisodeRatings(prevUserRatings);
+        worksRef.current = prevWorks;
+        setWorks(prevWorks);
+        return { ok: false, error: res.error };
+      }
+      return { ok: true };
     },
-    [userEpisodeRatings],
+    [],
   );
 
   const handleAddComment = useCallback(
@@ -371,25 +450,28 @@ export default function App() {
         createdAt: now,
       };
 
-      let nextCommentsCount = 1;
-      setWorks((prev) =>
-        prev.map((w) => {
-          if (w.id !== workId) return w;
-          const nextComments = [newComment, ...w.comments];
-          nextCommentsCount = Math.max(
-            w.stats.commentsCount + 1,
-            nextComments.length,
-          );
-          return {
-            ...w,
-            comments: nextComments,
-            stats: {
-              ...w.stats,
-              commentsCount: nextCommentsCount,
-            },
-          };
-        }),
-      );
+      const targetWork = worksRef.current.find((w) => w.id === workId);
+      const nextCommentsCount = targetWork
+        ? Math.max(
+            targetWork.stats.commentsCount + 1,
+            targetWork.comments.length + 1,
+          )
+        : 1;
+
+      const nextWorks = worksRef.current.map((w) => {
+        if (w.id !== workId) return w;
+        const nextComments = [newComment, ...w.comments];
+        return {
+          ...w,
+          comments: nextComments,
+          stats: {
+            ...w.stats,
+            commentsCount: nextCommentsCount,
+          },
+        };
+      });
+      worksRef.current = nextWorks;
+      setWorks(nextWorks);
 
       void insertCommentAndSyncCountInDb(newComment, nextCommentsCount);
     },
@@ -397,17 +479,18 @@ export default function App() {
   );
 
   const handleShareWork = useCallback((workId: string) => {
-    let nextShares = 1;
-    setWorks((prev) =>
-      prev.map((w) => {
-        if (w.id !== workId) return w;
-        nextShares = w.stats.shares + 1;
-        return {
-          ...w,
-          stats: { ...w.stats, shares: nextShares },
-        };
-      }),
+    const targetWork = worksRef.current.find((w) => w.id === workId);
+    const nextShares = (targetWork?.stats.shares ?? 0) + 1;
+    const nextWorks = worksRef.current.map((w) =>
+      w.id === workId
+        ? {
+            ...w,
+            stats: { ...w.stats, shares: nextShares },
+          }
+        : w,
     );
+    worksRef.current = nextWorks;
+    setWorks(nextWorks);
     void incrementWorkSharesInDb(workId, nextShares);
   }, []);
 
@@ -469,6 +552,7 @@ export default function App() {
             title: payload.episodeTitle,
             pages: pagesArray,
             rawContent: payload.rawContent,
+            likes: 0,
             ratingSum: 0,
             ratingCount: 0,
             publishedAt: now,
@@ -499,6 +583,7 @@ export default function App() {
               title: payload.episodeTitle,
               pages: pagesArray,
               rawContent: payload.rawContent,
+              likes: 0,
               ratingSum: 0,
               ratingCount: 0,
               publishedAt: now,
@@ -563,6 +648,7 @@ export default function App() {
             title: draft.title,
             pages,
             rawContent: draft.rawContent || 'No content written yet.',
+            likes: 0,
             ratingSum: 0,
             ratingCount: 0,
             publishedAt: draft.updatedAt,
@@ -664,6 +750,7 @@ export default function App() {
               onDeleteDraft={handleDeleteDraft}
               onPublishWork={handlePublishWork}
               onPreviewDraft={handlePreviewDraft}
+              onOverlayChange={setIsWriteOverlayOpen}
             />
           ) : (
             <FeedView
@@ -682,8 +769,10 @@ export default function App() {
           )}
         </main>
 
-        {/* Floating Bottom Glass Navigation Bar */}
-        <BottomNav activeTab={activeTab} onSelectTab={handleSelectTab} />
+        {/* Floating Bottom Glass Navigation Bar (tucked away during draft sheet / note editor / reader) */}
+        {!isWriteOverlayOpen && !readingWorkId && !previewDraftWork && (
+          <BottomNav activeTab={activeTab} onSelectTab={handleSelectTab} />
+        )}
       </div>
 
       {/* Full-Screen Reels Reader Popup */}

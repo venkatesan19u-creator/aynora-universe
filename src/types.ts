@@ -46,6 +46,7 @@ export interface Episode {
   title: string;
   pages: string[];
   rawContent: string;
+  likes: number;
   ratingSum: number;
   ratingCount: number;
   publishedAt: string;
@@ -81,6 +82,7 @@ export interface WorkItem {
   stats: WorkStats;
   comments: CommentItem[];
   userLiked?: boolean;
+  userEpisodeLikes?: Record<string, boolean>;
   userEpisodeRatings?: Record<number, number>;
   createdAt: string;
   updatedAt: string;

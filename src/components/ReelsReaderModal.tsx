@@ -27,13 +27,16 @@ interface ReelsReaderModalProps {
   onClose: () => void;
   onChangeReaderTheme: (theme: ReaderTheme) => void;
   onOpenWriterProfile: () => void;
-  onToggleLike: (workId: string) => void;
+  onToggleLike: (
+    workId: string,
+    episodeId: string,
+  ) => Promise<{ ok: boolean; error?: string } | void> | void;
   onRateEpisode: (
     workId: string,
     episodeId: string,
     episodeNumber: number,
     stars: number,
-  ) => void;
+  ) => Promise<{ ok: boolean; error?: string } | void> | void;
   onAddComment: (
     workId: string,
     episodeNumber: number,
@@ -67,6 +70,10 @@ export function ReelsReaderModal({
   const [showCommentsBox, setShowCommentsBox] = useState(true);
   const [shareToast, setShareToast] = useState<string | null>(null);
   const [episodeToast, setEpisodeToast] = useState<string | null>(null);
+  const [interactionNotice, setInteractionNotice] = useState<{
+    type: 'success' | 'error';
+    text: string;
+  } | null>(null);
 
   const scrollerRef = useRef<HTMLDivElement>(null);
   const nextSentinelRef = useRef<HTMLDivElement>(null);
@@ -98,6 +105,16 @@ export function ReelsReaderModal({
       ? (currentEpisode.ratingSum / epRatingCount).toFixed(1)
       : '0.0';
   const currentUserEpRating = work.userEpisodeRatings?.[currentEpNum] ?? 0;
+  const currentEpLiked = currentEpisode
+    ? Boolean(work.userEpisodeLikes?.[currentEpisode.id])
+    : false;
+  const currentEpLikes = currentEpisode?.likes ?? 0;
+  const episodeLikesTotal = work.episodes.reduce(
+    (acc, ep) => acc + (ep.likes ?? 0),
+    0,
+  );
+  const totalWorkLikes =
+    episodeLikesTotal > 0 ? episodeLikesTotal : work.stats.likes;
 
   const isPaper = readerTheme === 'paper';
 
@@ -113,6 +130,7 @@ export function ReelsReaderModal({
   const jumpToEpisode = (epIndex: number, startAtPageOne = true) => {
     autoAdvanceLockRef.current = true;
     setActiveEpisodeIndex(epIndex);
+    setInteractionNotice(null);
     const ep = work.episodes[epIndex];
     if (ep) {
       setEpisodeToast(`Episode ${ep.episodeNumber}: ${ep.title}`);
@@ -183,8 +201,50 @@ export function ReelsReaderModal({
     setCommentText('');
   };
 
+  const handleRateClick = async (stars: number) => {
+    if (isPreview || !currentEpisode) return;
+    const res = await onRateEpisode(
+      work.id,
+      currentEpisode.id,
+      currentEpNum,
+      stars,
+    );
+    if (res && res.ok === false) {
+      setInteractionNotice({
+        type: 'error',
+        text: res.error || 'Could not save rating to Supabase.',
+      });
+    } else {
+      setInteractionNotice({
+        type: 'success',
+        text: `Saved ${stars}★ rating for Episode ${currentEpNum}!`,
+      });
+    }
+    setTimeout(() => setInteractionNotice(null), 2600);
+  };
+
+  const handleLikeClick = async () => {
+    if (isPreview || !currentEpisode) return;
+    const willLike = !currentEpLiked;
+    const res = await onToggleLike(work.id, currentEpisode.id);
+    if (res && res.ok === false) {
+      setInteractionNotice({
+        type: 'error',
+        text: res.error || 'Could not save like to Supabase.',
+      });
+    } else {
+      setInteractionNotice({
+        type: 'success',
+        text: willLike
+          ? `Liked Episode ${currentEpNum}!`
+          : `Removed like from Episode ${currentEpNum}.`,
+      });
+    }
+    setTimeout(() => setInteractionNotice(null), 2200);
+  };
+
   return (
-    <div className="fixed inset-0 z-50 flex justify-center bg-[#06030E]/90 backdrop-blur-lg">
+    <div className="fixed inset-0 z-[60] flex justify-center bg-[#06030E]/90 backdrop-blur-lg">
       <div
         className={`w-full max-w-[430px] h-dvh flex flex-col relative overflow-hidden transition-colors duration-300 ${
           isPaper
@@ -196,10 +256,10 @@ export function ReelsReaderModal({
 
         {/* Top Reader Bar */}
         <div
-          className={`relative z-20 flex items-center justify-between gap-2 px-3 py-2.5 border-b backdrop-blur-xl ${
+          className={`relative z-30 shrink-0 flex items-center justify-between gap-2 px-3 py-2.5 border-b backdrop-blur-xl ${
             isPaper
-              ? 'bg-[#EFE4D1]/90 border-[#231B15]/10 text-[#231B15]'
-              : 'bg-[#130A2B]/80 border-white/10 text-white'
+              ? 'bg-[#EFE4D1]/95 border-[#231B15]/10 text-[#231B15]'
+              : 'bg-[#130A2B]/90 border-white/10 text-white'
           }`}
         >
           <button
@@ -286,10 +346,10 @@ export function ReelsReaderModal({
         {/* Reels Vertical Snap-Scrolling Container */}
         <div
           ref={scrollerRef}
-          className="relative z-10 flex-1 overflow-y-scroll snap-y snap-mandatory no-scrollbar"
+          className="relative z-10 flex-1 min-h-0 overflow-y-scroll snap-y snap-mandatory no-scrollbar"
         >
           {/* SCREEN 0: COVER & EPISODE OVERVIEW */}
-          <section className="snap-start h-full w-full shrink-0 overflow-y-auto px-4 py-4 flex flex-col justify-between">
+          <section className="snap-start h-full min-h-0 w-full shrink-0 overflow-y-auto px-4 pt-4 pb-6 flex flex-col justify-between">
             <div className="space-y-4">
               <div className="flex gap-3.5 items-start">
                 <img
@@ -337,17 +397,32 @@ export function ReelsReaderModal({
                       isPaper ? 'text-[#5A483A]' : 'text-white/75'
                     }`}
                   >
-                    <span className="flex items-center gap-1">
+                    <span className="flex items-center gap-1" title="Views">
                       <Eye className="w-3.5 h-3.5" />
                       {formatCount(work.stats.views)}
                     </span>
-                    <span className="flex items-center gap-1">
-                      <Heart className="w-3.5 h-3.5 text-rose-400" />
-                      {formatCount(work.stats.likes)}
+                    <span className="flex items-center gap-1" title="Total Likes">
+                      <Heart
+                        className={`w-3.5 h-3.5 ${
+                          work.userLiked
+                            ? 'text-rose-500 fill-rose-500'
+                            : 'text-rose-400'
+                        }`}
+                      />
+                      {formatCount(totalWorkLikes)}
                     </span>
-                    <span className="flex items-center gap-1">
+                    <span className="flex items-center gap-1" title="Comments">
+                      <MessageCircle className="w-3.5 h-3.5 text-sky-400" />
+                      {formatCount(
+                        Math.max(
+                          work.stats.commentsCount,
+                          work.comments.length,
+                        ),
+                      )}
+                    </span>
+                    <span className="flex items-center gap-1" title="Average Rating">
                       <Star className="w-3.5 h-3.5 text-amber-400 fill-amber-400" />
-                      {avgRating}
+                      {avgRating} ({work.stats.ratingCount})
                     </span>
                   </div>
                 </div>
@@ -415,9 +490,21 @@ export function ReelsReaderModal({
                             {ep.title}
                           </p>
                         </div>
-                        <span className="shrink-0 text-[11px] opacity-75 tabular-nums">
-                          {epPages} {epPages === 1 ? 'pg' : 'pgs'}
-                        </span>
+                        <div className="shrink-0 flex items-center gap-2 text-[11px] opacity-80 tabular-nums">
+                          <span className="flex items-center gap-0.5">
+                            <Heart
+                              className={`w-3 h-3 ${
+                                work.userEpisodeLikes?.[ep.id]
+                                  ? 'text-rose-500 fill-rose-500'
+                                  : 'text-rose-400'
+                              }`}
+                            />
+                            {formatCount(ep.likes ?? 0)}
+                          </span>
+                          <span>
+                            {epPages} {epPages === 1 ? 'pg' : 'pgs'}
+                          </span>
+                        </div>
                       </button>
                     );
                   })}
@@ -444,33 +531,33 @@ export function ReelsReaderModal({
           {pages.map((pageText, pageIdx) => (
             <section
               key={`${currentEpisode?.id}-pg-${pageIdx}`}
-              className="snap-start h-full w-full shrink-0 p-4 flex flex-col justify-between"
+              className="snap-start h-full min-h-0 w-full shrink-0 px-4 pt-3.5 pb-4 flex flex-col"
             >
               {/* Page Top Meta */}
-              <div className="flex items-center justify-between text-xs opacity-75">
-                <span className="font-medium truncate max-w-[65%]">
+              <div className="shrink-0 pb-2 flex items-center justify-between gap-2 text-xs opacity-80">
+                <span className="font-medium truncate max-w-[68%]">
                   Ep {currentEpisode?.episodeNumber ?? 1} · {currentEpisode?.title}
                 </span>
-                <span className="tabular-nums font-semibold">
+                <span className="tabular-nums font-semibold shrink-0">
                   Page {pageIdx + 1} / {pages.length}
                 </span>
               </div>
 
-              {/* Page Body Card */}
+              {/* Page Body Card (my-auto prevents top clipping on tall pages) */}
               <div
-                className={`my-3 flex-1 rounded-3xl p-5 overflow-y-auto flex flex-col justify-center border ${
+                className={`flex-1 min-h-0 rounded-3xl p-5 overflow-y-auto flex flex-col border ${
                   isPaper
                     ? 'bg-[#FBF7EE] border-[#231B15]/10 text-[#231B15] shadow-sm'
                     : 'glass-panel text-[#FBF7EE]'
                 }`}
               >
-                <div className="font-literary text-[17px] leading-[1.85] whitespace-pre-line">
+                <div className="my-auto font-literary text-[17px] leading-[1.85] whitespace-pre-line">
                   {pageText}
                 </div>
               </div>
 
               {/* Quick Page Navigation Controls */}
-              <div className="flex items-center justify-between text-xs">
+              <div className="shrink-0 pt-2.5 flex items-center justify-between text-xs">
                 <button
                   type="button"
                   onClick={() => scrollToSlide(pageIdx)}
@@ -520,9 +607,9 @@ export function ReelsReaderModal({
                     : 'glass-panel'
                 }`}
               >
-                <p className="text-xs font-medium opacity-80 mb-2">
+                <p className="text-xs font-medium opacity-85 mb-2">
                   Rate Episode {currentEpNum} ({epAvgRating} ★ · {epRatingCount}{' '}
-                  ratings)
+                  {epRatingCount === 1 ? 'rating' : 'ratings'})
                 </p>
                 <div className="flex items-center justify-center gap-2">
                   {[1, 2, 3, 4, 5].map((star) => {
@@ -532,15 +619,7 @@ export function ReelsReaderModal({
                         key={star}
                         type="button"
                         disabled={isPreview || !currentEpisode}
-                        onClick={() =>
-                          currentEpisode &&
-                          onRateEpisode(
-                            work.id,
-                            currentEpisode.id,
-                            currentEpNum,
-                            star,
-                          )
-                        }
+                        onClick={() => void handleRateClick(star)}
                         aria-label={`Rate ${star} stars`}
                         className="p-1.5 active:scale-110 transition-transform"
                       >
@@ -557,17 +636,28 @@ export function ReelsReaderModal({
                     );
                   })}
                 </div>
+                {currentUserEpRating > 0 && (
+                  <p
+                    className={`text-[11px] font-medium mt-1.5 ${
+                      isPaper ? 'text-amber-700' : 'text-[#F3DCB3]'
+                    }`}
+                  >
+                    You rated {currentUserEpRating} ★
+                  </p>
+                )}
               </div>
 
               {/* 2, 3, 4: Like, Comment Toggle, Share */}
               <div className="grid grid-cols-3 gap-2.5">
                 <button
                   type="button"
-                  disabled={isPreview}
-                  onClick={() => onToggleLike(work.id)}
+                  disabled={isPreview || !currentEpisode}
+                  onClick={() => void handleLikeClick()}
                   className={`min-h-[48px] rounded-2xl border flex flex-col items-center justify-center gap-0.5 text-xs font-semibold active:scale-95 transition ${
-                    work.userLiked
-                      ? 'bg-rose-500/20 border-rose-400 text-rose-300'
+                    currentEpLiked
+                      ? isPaper
+                        ? 'bg-rose-100 border-rose-400 text-rose-700'
+                        : 'bg-rose-500/25 border-rose-400 text-rose-200'
                       : isPaper
                         ? 'bg-[#FBF7EE] border-[#231B15]/15 text-[#231B15]'
                         : 'glass-panel text-white'
@@ -575,11 +665,11 @@ export function ReelsReaderModal({
                 >
                   <Heart
                     className={`w-4 h-4 ${
-                      work.userLiked ? 'fill-rose-400 text-rose-400' : ''
+                      currentEpLiked ? 'fill-rose-500 text-rose-500' : ''
                     }`}
                   />
                   <span className="tabular-nums">
-                    Like ({work.stats.likes})
+                    {currentEpLiked ? 'Liked' : 'Like'} ({currentEpLikes})
                   </span>
                 </button>
 
@@ -594,7 +684,7 @@ export function ReelsReaderModal({
                 >
                   <MessageCircle className="w-4 h-4 text-sky-400" />
                   <span className="tabular-nums">
-                    Comment ({work.comments.length})
+                    Comment ({Math.max(work.stats.commentsCount, work.comments.length)})
                   </span>
                 </button>
 
@@ -614,6 +704,18 @@ export function ReelsReaderModal({
                   </span>
                 </button>
               </div>
+
+              {interactionNotice && (
+                <p
+                  className={`text-center text-xs font-medium ${
+                    interactionNotice.type === 'error'
+                      ? 'text-rose-400'
+                      : 'text-emerald-400'
+                  }`}
+                >
+                  {interactionNotice.text}
+                </p>
+              )}
 
               {shareToast && (
                 <p className="text-center text-xs font-medium text-emerald-400">

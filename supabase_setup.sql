@@ -24,10 +24,14 @@ CREATE TABLE IF NOT EXISTS public.episodes (
   episode_number INTEGER NOT NULL DEFAULT 1,
   title TEXT NOT NULL,
   pages JSONB NOT NULL DEFAULT '[]'::jsonb,
+  likes INTEGER NOT NULL DEFAULT 0,
   rating_sum INTEGER NOT NULL DEFAULT 0,
   rating_count INTEGER NOT NULL DEFAULT 0,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE public.episodes
+  ADD COLUMN IF NOT EXISTS likes INTEGER NOT NULL DEFAULT 0;
 
 CREATE INDEX IF NOT EXISTS idx_episodes_work_id ON public.episodes(work_id, episode_number);
 

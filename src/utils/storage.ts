@@ -87,6 +87,257 @@ export function splitPages(rawContent: string): string[] {
   return parts.length > 0 ? parts : [''];
 }
 
+export interface PageRange {
+  index: number;
+  start: number;
+  end: number;
+  text: string;
+}
+
+export function getPageRanges(rawContent: string): PageRange[] {
+  if (!rawContent) {
+    return [{ index: 0, start: 0, end: 0, text: '' }];
+  }
+
+  const ranges: PageRange[] = [];
+  let searchFrom = 0;
+  let pageIdx = 0;
+
+  while (searchFrom <= rawContent.length) {
+    const markerIdx = rawContent.indexOf(PAGE_BREAK_MARKER, searchFrom);
+    const segmentEnd = markerIdx === -1 ? rawContent.length : markerIdx;
+    const rawSegment = rawContent.slice(searchFrom, segmentEnd);
+    const trimmed = rawSegment.trim();
+
+    if (trimmed.length > 0) {
+      const leadingWs = rawSegment.length - rawSegment.trimStart().length;
+      const start = searchFrom + leadingWs;
+      const end = start + trimmed.length;
+      ranges.push({
+        index: pageIdx,
+        start,
+        end,
+        text: trimmed,
+      });
+      pageIdx += 1;
+    }
+
+    if (markerIdx === -1) break;
+    searchFrom = markerIdx + PAGE_BREAK_MARKER.length;
+  }
+
+  if (ranges.length === 0) {
+    return [{ index: 0, start: 0, end: rawContent.length, text: rawContent.trim() }];
+  }
+
+  return ranges;
+}
+
+interface GraphemeToken {
+  segment: string;
+  index: number;
+}
+
+function segmentGraphemes(text: string): GraphemeToken[] {
+  if (typeof Intl !== 'undefined' && 'Segmenter' in Intl) {
+    const SegmenterCtor = (
+      Intl as unknown as {
+        Segmenter: new (
+          locale?: string,
+          opts?: { granularity: 'grapheme' },
+        ) => {
+          segment: (input: string) => Iterable<{ segment: string; index: number }>;
+        };
+      }
+    ).Segmenter;
+    const segmenter = new SegmenterCtor(undefined, { granularity: 'grapheme' });
+    return Array.from(segmenter.segment(text), (item) => ({
+      segment: item.segment,
+      index: item.index,
+    }));
+  }
+
+  // Fallback: group Unicode combining marks & ZWJ with preceding character
+  const tokens: GraphemeToken[] = [];
+  const codePoints = Array.from(text);
+  let offset = 0;
+  for (const cp of codePoints) {
+    const isCombining = /[\p{M}\u200D]/u.test(cp);
+    if (isCombining && tokens.length > 0) {
+      tokens[tokens.length - 1].segment += cp;
+    } else {
+      tokens.push({ segment: cp, index: offset });
+    }
+    offset += cp.length;
+  }
+  return tokens;
+}
+
+function measureTextMetrics(text: string): { graphemes: number; visualLines: number } {
+  const tokens = segmentGraphemes(text);
+  const CHARS_PER_MOBILE_LINE = 36;
+  let visualLines = 0;
+  let currentLineLen = 0;
+
+  for (let i = 0; i < tokens.length; i += 1) {
+    const seg = tokens[i].segment;
+    if (seg === '\n') {
+      visualLines += currentLineLen === 0 ? 0.65 : Math.max(1, Math.ceil(currentLineLen / CHARS_PER_MOBILE_LINE));
+      currentLineLen = 0;
+    } else {
+      currentLineLen += 1;
+    }
+  }
+  if (currentLineLen > 0) {
+    visualLines += Math.max(1, Math.ceil(currentLineLen / CHARS_PER_MOBILE_LINE));
+  }
+
+  return {
+    graphemes: tokens.length,
+    visualLines: Math.max(1, visualLines),
+  };
+}
+
+export function autoCutText(rawContent: string): string {
+  const cleaned = rawContent
+    .replace(/\r\n?/g, '\n')
+    .split(PAGE_BREAK_MARKER)
+    .map((chunk) => chunk.replace(/^\n+|\n+$/g, ''))
+    .filter((chunk) => chunk.trim().length > 0)
+    .join('\n\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+
+  if (!cleaned) return '';
+
+  const MAX_GRAPHEMES = 520;
+  const MAX_VISUAL_LINES = 11.5;
+  const ORPHAN_GRACE_GRAPHEMES = 570;
+  const ORPHAN_GRACE_LINES = 12.2;
+  const CHARS_PER_MOBILE_LINE = 36;
+
+  const pages: string[] = [];
+  let cursor = 0;
+
+  while (cursor < cleaned.length) {
+    while (cursor < cleaned.length && /[ \t\n]/.test(cleaned[cursor])) {
+      cursor += 1;
+    }
+    if (cursor >= cleaned.length) break;
+
+    const remaining = cleaned.slice(cursor);
+    const remainingMetrics = measureTextMetrics(remaining);
+
+    if (
+      remainingMetrics.graphemes <= ORPHAN_GRACE_GRAPHEMES &&
+      remainingMetrics.visualLines <= ORPHAN_GRACE_LINES
+    ) {
+      pages.push(remaining.trim());
+      break;
+    }
+
+    // Balance penultimate split slightly when remaining is just above 1 page
+    const effectiveMaxGraphemes =
+      remainingMetrics.graphemes <= 760 && remainingMetrics.visualLines <= 17
+        ? Math.max(320, Math.floor(remainingMetrics.graphemes * 0.56))
+        : MAX_GRAPHEMES;
+
+    const tokens = segmentGraphemes(remaining);
+    let gCount = 0;
+    let vLines = 0;
+    let lineChars = 0;
+    let limitOffset = remaining.length;
+    let minOffset = 0;
+
+    for (let i = 0; i < tokens.length; i += 1) {
+      const tok = tokens[i];
+      if (tok.segment === '\n') {
+        vLines += lineChars === 0 ? 0.65 : Math.max(1, Math.ceil(lineChars / CHARS_PER_MOBILE_LINE));
+        lineChars = 0;
+      } else {
+        lineChars += 1;
+      }
+      gCount += 1;
+
+      const currentLineEstimate =
+        vLines + (lineChars > 0 ? Math.ceil(lineChars / CHARS_PER_MOBILE_LINE) : 0);
+
+      if (minOffset === 0 && (gCount >= 190 || currentLineEstimate >= 4.5)) {
+        minOffset = tok.index + tok.segment.length;
+      }
+
+      if (gCount > effectiveMaxGraphemes || currentLineEstimate > MAX_VISUAL_LINES) {
+        limitOffset = tok.index;
+        break;
+      }
+    }
+
+    if (limitOffset <= 0 && tokens.length > 0) {
+      limitOffset = tokens[0].segment.length;
+    }
+    if (minOffset === 0 || minOffset > limitOffset) {
+      minOffset = Math.floor(limitOffset * 0.45);
+    }
+
+    const windowSlice = remaining.slice(0, limitOffset);
+    let cutOffset = -1;
+
+    // 1. Prioritize paragraph breaks (\n\n)
+    const lastPara = windowSlice.lastIndexOf('\n\n');
+    if (lastPara >= minOffset) {
+      cutOffset = lastPara;
+    }
+
+    // 2. Fallback to single line break (\n)
+    if (cutOffset === -1) {
+      const lastLine = windowSlice.lastIndexOf('\n');
+      if (lastLine >= minOffset) {
+        cutOffset = lastLine;
+      }
+    }
+
+    // 3. Fallback to sentence endings (. ! ? … ।) followed by whitespace or end of window
+    if (cutOffset === -1) {
+      const sentenceRegex = /[.!?…।](?:["'”’)\]]*)(?=\s|$)/g;
+      let match: RegExpExecArray | null;
+      let lastSentenceEnd = -1;
+      while ((match = sentenceRegex.exec(windowSlice)) !== null) {
+        const endPos = match.index + match[0].length;
+        if (endPos >= minOffset) {
+          lastSentenceEnd = endPos;
+        }
+      }
+      if (lastSentenceEnd !== -1) {
+        cutOffset = lastSentenceEnd;
+      }
+    }
+
+    // 4. Fallback to word space
+    if (cutOffset === -1) {
+      const spaceMin = Math.min(minOffset, 24);
+      for (let idx = windowSlice.length - 1; idx >= spaceMin; idx -= 1) {
+        if (windowSlice[idx] === ' ' || windowSlice[idx] === '\t') {
+          cutOffset = idx;
+          break;
+        }
+      }
+    }
+
+    // 5. Final fallback: grapheme-cluster-aligned limitOffset
+    if (cutOffset <= 0) {
+      cutOffset = limitOffset;
+    }
+
+    const pageSlice = remaining.slice(0, cutOffset).trim();
+    if (pageSlice.length > 0) {
+      pages.push(pageSlice);
+    }
+    cursor += cutOffset;
+  }
+
+  return pages.join(`\n\n${PAGE_BREAK_MARKER}\n\n`);
+}
+
 export function formatCount(count: number): string {
   if (count >= 1000000) return `${(count / 1000000).toFixed(1)}M`;
   if (count >= 1000) return `${(count / 1000).toFixed(1)}K`;

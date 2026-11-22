@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   ArrowLeft,
   BookPlus,
@@ -10,6 +11,8 @@ import {
   Send,
   Sparkles,
   Trash2,
+  Wand2,
+  X,
 } from 'lucide-react';
 import {
   CATEGORIES_BY_TYPE,
@@ -20,6 +23,8 @@ import {
 } from '../types';
 import { uploadMediaToBucket } from '../lib/supabase';
 import {
+  autoCutText,
+  getPageRanges,
   processImageFile,
   processImageToBlob,
   splitPages,
@@ -52,6 +57,7 @@ interface WriteStudioProps {
     rawContent: string;
   }) => Promise<void>;
   onPreviewDraft: (draft: DraftItem) => void;
+  onOverlayChange?: (open: boolean) => void;
 }
 
 const DEFAULT_STUDIO_COVERS: Record<WorkType, string> = {
@@ -81,9 +87,12 @@ export function WriteStudio({
   onDeleteDraft,
   onPublishWork,
   onPreviewDraft,
+  onOverlayChange,
 }: WriteStudioProps) {
   const [step, setStep] = useState<1 | 2>(1);
   const [showDraftsModal, setShowDraftsModal] = useState(false);
+  const [dragOffsetY, setDragOffsetY] = useState(0);
+  const [isDraggingSheet, setIsDraggingSheet] = useState(false);
 
   const [workType, setWorkType] = useState<WorkType>('story');
   const [category, setCategory] = useState<string>(CATEGORIES_BY_TYPE.story[0]);
@@ -99,11 +108,51 @@ export function WriteStudio({
 
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [editorFeedback, setEditorFeedback] = useState<string | null>(null);
+  const [activePageIndex, setActivePageIndex] = useState<number>(0);
   const [isUploadingCover, setIsUploadingCover] = useState(false);
   const [isPublishing, setIsPublishing] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const chipRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  const dragStartYRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    onOverlayChange?.(step === 2 || showDraftsModal);
+    return () => {
+      onOverlayChange?.(false);
+    };
+  }, [step, showDraftsModal, onOverlayChange]);
+
+  const closeDraftsModal = () => {
+    setShowDraftsModal(false);
+    setDragOffsetY(0);
+    setIsDraggingSheet(false);
+    dragStartYRef.current = null;
+  };
+
+  const handleSheetDragStart = (clientY: number) => {
+    dragStartYRef.current = clientY;
+    setIsDraggingSheet(true);
+  };
+
+  const handleSheetDragMove = (clientY: number) => {
+    if (dragStartYRef.current === null) return;
+    const delta = Math.max(0, clientY - dragStartYRef.current);
+    setDragOffsetY(delta);
+  };
+
+  const handleSheetDragEnd = () => {
+    if (dragStartYRef.current === null) return;
+    if (dragOffsetY > 85) {
+      closeDraftsModal();
+    } else {
+      setDragOffsetY(0);
+      setIsDraggingSheet(false);
+      dragStartYRef.current = null;
+    }
+  };
 
   // Sync external context (Add Episode / Edit Work)
   useEffect(() => {
@@ -220,9 +269,29 @@ export function WriteStudio({
     setStep(2);
   };
 
+  const pageRanges = getPageRanges(rawContent);
+  const safeActivePageIndex = Math.min(
+    activePageIndex,
+    Math.max(0, pageRanges.length - 1),
+  );
+
+  const syncActivePageFromCursor = () => {
+    const el = textareaRef.current;
+    if (!el) return;
+    const caret = el.selectionStart ?? 0;
+    const foundIdx = pageRanges.findIndex(
+      (range, idx) =>
+        caret <= range.end || idx === pageRanges.length - 1,
+    );
+    if (foundIdx !== -1 && foundIdx !== activePageIndex) {
+      setActivePageIndex(foundIdx);
+    }
+  };
+
   const handleCutPage = () => {
     const el = textareaRef.current;
     const insertion = `\n\n${PAGE_BREAK_MARKER}\n\n`;
+    setErrorMessage(null);
     if (!el) {
       setRawContent((prev) => `${prev}${insertion}`);
       return;
@@ -236,6 +305,92 @@ export function WriteStudio({
       el.focus();
       const pos = start + insertion.length;
       el.setSelectionRange(pos, pos);
+      const nextRanges = getPageRanges(next);
+      const nextIdx = nextRanges.findIndex((r) => pos >= r.start && pos <= r.end);
+      if (nextIdx !== -1) {
+        setActivePageIndex(nextIdx);
+      }
+    });
+  };
+
+  const handleAutoCut = () => {
+    if (!rawContent.trim()) {
+      setErrorMessage(
+        'Write or paste your content first before using Auto Cut.',
+      );
+      return;
+    }
+    setErrorMessage(null);
+    const next = autoCutText(rawContent);
+    setRawContent(next);
+    setActivePageIndex(0);
+    const totalGenerated = splitPages(next).length;
+    setEditorFeedback(
+      `Auto-split into ${totalGenerated} ${totalGenerated === 1 ? 'page' : 'pages'}.`,
+    );
+    window.setTimeout(() => {
+      setEditorFeedback((prev) =>
+        prev?.startsWith('Auto-split into') ? null : prev,
+      );
+    }, 2800);
+
+    requestAnimationFrame(() => {
+      if (textareaRef.current) {
+        textareaRef.current.scrollTo({ top: 0, behavior: 'smooth' });
+      }
+      chipRefs.current[0]?.scrollIntoView({
+        behavior: 'smooth',
+        inline: 'start',
+        block: 'nearest',
+      });
+    });
+  };
+
+  const handleJumpToPage = (pageIdx: number) => {
+    const range = pageRanges[pageIdx];
+    if (!range) return;
+    setActivePageIndex(pageIdx);
+    chipRefs.current[pageIdx]?.scrollIntoView({
+      behavior: 'smooth',
+      inline: 'center',
+      block: 'nearest',
+    });
+
+    const el = textareaRef.current;
+    if (!el) return;
+
+    // Measure exact vertical pixel offset inside the textarea before focusing/selecting
+    const style = window.getComputedStyle(el);
+    const mirror = document.createElement('div');
+    mirror.style.position = 'fixed';
+    mirror.style.visibility = 'hidden';
+    mirror.style.pointerEvents = 'none';
+    mirror.style.top = '-9999px';
+    mirror.style.left = '-9999px';
+    mirror.style.boxSizing = style.boxSizing;
+    mirror.style.width = `${el.clientWidth}px`;
+    mirror.style.padding = style.padding;
+    mirror.style.border = style.border;
+    mirror.style.fontFamily = style.fontFamily;
+    mirror.style.fontSize = style.fontSize;
+    mirror.style.fontWeight = style.fontWeight;
+    mirror.style.lineHeight = style.lineHeight;
+    mirror.style.letterSpacing = style.letterSpacing;
+    mirror.style.whiteSpace = 'pre-wrap';
+    mirror.style.wordBreak = 'break-word';
+
+    mirror.textContent = rawContent.slice(0, range.start);
+    const marker = document.createElement('span');
+    marker.textContent = '\u200b';
+    mirror.appendChild(marker);
+    document.body.appendChild(mirror);
+    const targetTop = Math.max(0, marker.offsetTop - 14);
+    document.body.removeChild(mirror);
+
+    el.focus({ preventScroll: true });
+    el.setSelectionRange(range.start, range.end);
+    requestAnimationFrame(() => {
+      el.scrollTo({ top: targetTop, behavior: 'smooth' });
     });
   };
 
@@ -277,6 +432,8 @@ export function WriteStudio({
     setEditingEpisodeId(undefined);
     setActiveDraftId(undefined);
     setHasCompletedStep2(false);
+    setActivePageIndex(0);
+    setEditorFeedback(null);
     setStep(1);
   };
 
@@ -365,19 +522,21 @@ export function WriteStudio({
     setEditingEpisodeId(draft.editingEpisodeId);
     setActiveDraftId(draft.id);
     setHasCompletedStep2(true);
-    setShowDraftsModal(false);
+    setActivePageIndex(0);
+    setEditorFeedback(null);
+    closeDraftsModal();
     setStep(1);
   };
 
   // STEP 2: FULL-SCREEN NOTE EDITOR
   if (step === 2) {
-    return (
-      <div className="fixed inset-0 z-50 flex justify-center bg-[#090415]/90 backdrop-blur-xl">
+    return createPortal(
+      <div className="fixed inset-0 z-[60] flex justify-center bg-[#090415]/90 backdrop-blur-xl">
         <div className="w-full max-w-[430px] h-dvh flex flex-col cosmic-canvas relative overflow-hidden">
           <div className="cosmic-stars absolute inset-0" />
 
           {/* Editor Header */}
-          <div className="relative z-10 flex items-center justify-between gap-2 px-3.5 py-3 border-b border-white/10 bg-[#140B2D]/80 backdrop-blur-xl">
+          <div className="relative z-10 shrink-0 flex items-center justify-between gap-2 px-3.5 py-3 border-b border-white/10 bg-[#140B2D]/85 backdrop-blur-xl">
             <button
               type="button"
               onClick={() => {
@@ -430,20 +589,38 @@ export function WriteStudio({
               />
             </div>
 
-            {/* Cut Page Toolbar */}
-            <div className="flex items-center justify-between gap-2">
-              <button
-                type="button"
-                onClick={handleCutPage}
-                className="min-h-[40px] px-4 py-2 rounded-full bg-[#F3DCB3] text-[#1A1033] text-xs font-bold flex items-center gap-1.5 shadow-md active:scale-95 transition"
-              >
-                <Scissors className="w-3.5 h-3.5" />
-                <span>✂️ Cut Page</span>
-              </button>
+            {/* Cut Page & Auto Cut Toolbar */}
+            <div className="space-y-1.5">
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={handleCutPage}
+                  className="min-h-[40px] px-3.5 py-2 rounded-full bg-[#F3DCB3] text-[#1A1033] text-xs font-bold flex items-center justify-center gap-1.5 shadow-md active:scale-95 transition whitespace-nowrap"
+                >
+                  <Scissors className="w-3.5 h-3.5 shrink-0" />
+                  <span>✂️ Cut Page</span>
+                </button>
 
-              <span className="text-[11px] text-white/65 tabular-nums">
-                Creates Reels-style page breaks
-              </span>
+                <button
+                  type="button"
+                  onClick={handleAutoCut}
+                  className="min-h-[40px] px-3.5 py-2 rounded-full glass-pill border border-[#F3DCB3]/45 text-[#F3DCB3] text-xs font-bold flex items-center justify-center gap-1.5 hover:bg-[#F3DCB3]/15 active:scale-95 transition whitespace-nowrap"
+                  title="Automatically split text into comfortable reader pages"
+                >
+                  <Wand2 className="w-3.5 h-3.5 shrink-0" />
+                  <span>Auto Cut</span>
+                </button>
+              </div>
+
+              <p className="text-[11px] text-white/65 tabular-nums px-1">
+                {editorFeedback ? (
+                  <span className="text-emerald-300 font-medium">
+                    {editorFeedback}
+                  </span>
+                ) : (
+                  'Creates Reels-style page breaks'
+                )}
+              </p>
             </div>
 
             {/* Main Writing Area */}
@@ -453,21 +630,36 @@ export function WriteStudio({
               onChange={(e) => {
                 setRawContent(e.target.value);
                 if (errorMessage) setErrorMessage(null);
+                if (editorFeedback) setEditorFeedback(null);
               }}
-              placeholder="Write your story, novel chapter, or poetry here... Tap '✂️ Cut Page' anytime to divide into vertical reading pages."
+              onClick={syncActivePageFromCursor}
+              onKeyUp={syncActivePageFromCursor}
+              placeholder="Write your story, novel chapter, or poetry here... Tap 'Cut Page' manually or 'Auto Cut' to split into balanced vertical reading pages."
               className="flex-1 min-h-[210px] w-full p-4 rounded-2xl glass-panel text-white/95 placeholder:text-white/40 text-[15px] leading-relaxed font-literary resize-none focus:outline-none focus:ring-2 focus:ring-[#F3DCB3]/50"
             />
 
-            {/* Live Page Count Pills Preview */}
-            <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5">
-              {(pageCount > 0 ? pages : ['']).map((_, idx) => (
-                <span
-                  key={`pg-ind-${idx}`}
-                  className="shrink-0 px-2.5 py-1 rounded-full glass-pill text-[11px] text-[#F3DCB3] font-medium tabular-nums"
-                >
-                  Page {idx + 1}
-                </span>
-              ))}
+            {/* Live Interactive Page Selector Chips */}
+            <div className="flex items-center gap-1.5 overflow-x-auto scroll-smooth no-scrollbar py-1">
+              {(pageCount > 0 ? pages : ['']).map((_, idx) => {
+                const isSelected = idx === safeActivePageIndex;
+                return (
+                  <button
+                    key={`pg-ind-${idx}`}
+                    ref={(el) => {
+                      chipRefs.current[idx] = el;
+                    }}
+                    type="button"
+                    onClick={() => handleJumpToPage(idx)}
+                    className={`shrink-0 px-3 py-1 rounded-full text-[11px] font-medium tabular-nums transition active:scale-95 ${
+                      isSelected
+                        ? 'bg-[#F3DCB3] text-[#1A1033] font-bold shadow-[0_2px_10px_rgba(243,220,179,0.35)]'
+                        : 'glass-pill text-[#F3DCB3] hover:bg-white/15'
+                    }`}
+                  >
+                    Page {idx + 1}
+                  </button>
+                );
+              })}
             </div>
 
             {errorMessage && (
@@ -501,7 +693,8 @@ export function WriteStudio({
             </div>
           </div>
         </div>
-      </div>
+      </div>,
+      document.body,
     );
   }
 
@@ -755,118 +948,168 @@ export function WriteStudio({
         </button>
       </div>
 
-      {/* Drafts Modal */}
-      {showDraftsModal && (
-        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/65 backdrop-blur-sm p-3">
-          <div className="w-full max-w-[410px] max-h-[82vh] flex flex-col glass-panel rounded-3xl p-4">
-            <div className="flex items-center justify-between pb-3 border-b border-white/10">
-              <h2 className="font-display text-xl font-semibold text-[#F3DCB3]">
-                Saved Drafts ({drafts.length})
-              </h2>
-              <button
-                type="button"
-                onClick={() => setShowDraftsModal(false)}
-                className="min-h-[36px] px-3 rounded-full glass-pill text-xs text-white/85"
+      {/* Drafts Bottom Sheet Modal (portaled above BottomNav with pull-down to close) */}
+      {showDraftsModal &&
+        createPortal(
+          <div
+            onClick={closeDraftsModal}
+            className="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/70 backdrop-blur-sm px-2.5 pt-10 pb-2 sm:p-4"
+          >
+            <div
+              onClick={(e) => e.stopPropagation()}
+              style={{
+                transform: `translateY(${dragOffsetY}px)`,
+              }}
+              className={`w-full max-w-[416px] max-h-[84dvh] flex flex-col overflow-hidden glass-panel rounded-t-[28px] sm:rounded-3xl shadow-[0_-12px_48px_rgba(0,0,0,0.65)] ${
+                isDraggingSheet ? '' : 'transition-transform duration-200'
+              }`}
+            >
+              {/* Drag Handle + Header (swipe down to close) */}
+              <div
+                onTouchStart={(e) => {
+                  if (e.touches[0]) {
+                    handleSheetDragStart(e.touches[0].clientY);
+                  }
+                }}
+                onTouchMove={(e) => {
+                  if (e.touches[0]) {
+                    handleSheetDragMove(e.touches[0].clientY);
+                  }
+                }}
+                onTouchEnd={handleSheetDragEnd}
+                onPointerDown={(e) => {
+                  if (e.pointerType === 'mouse') {
+                    handleSheetDragStart(e.clientY);
+                  }
+                }}
+                onPointerMove={(e) => {
+                  if (e.pointerType === 'mouse' && isDraggingSheet) {
+                    handleSheetDragMove(e.clientY);
+                  }
+                }}
+                onPointerUp={handleSheetDragEnd}
+                onPointerCancel={handleSheetDragEnd}
+                className="shrink-0 select-none touch-none px-4 pt-2.5 pb-3 border-b border-white/10 cursor-grab active:cursor-grabbing"
               >
-                Close
-              </button>
-            </div>
+                <div className="mx-auto mb-2.5 h-1.5 w-11 rounded-full bg-white/30" />
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <h2 className="font-display text-xl font-semibold text-[#F3DCB3]">
+                      Saved Drafts ({drafts.length})
+                    </h2>
+                    <p className="text-[11px] text-white/55">
+                      Swipe down from header or tap close to dismiss
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    aria-label="Close Saved Drafts"
+                    onClick={closeDraftsModal}
+                    className="min-w-[36px] min-h-[36px] px-3 rounded-full glass-pill text-xs font-medium text-white/90 flex items-center gap-1 hover:bg-white/15 active:scale-95 transition"
+                  >
+                    <X className="w-4 h-4" />
+                    <span>Close</span>
+                  </button>
+                </div>
+              </div>
 
-            <div className="flex-1 overflow-y-auto py-3 space-y-2.5">
-              {drafts.length === 0 ? (
-                <p className="text-center text-xs text-white/65 py-8">
-                  No saved drafts yet. Write content and tap “Save to Drafts”.
-                </p>
-              ) : (
-                drafts.map((draft) => {
-                  const pgCount = splitPages(draft.rawContent).length;
-                  return (
-                    <div
-                      key={draft.id}
-                      className="rounded-2xl bg-white/5 border border-white/10 p-2.5 flex gap-3"
-                    >
-                      <img
-                        src={draft.coverUrl}
-                        alt={draft.title}
-                        className="w-14 aspect-[2/3] rounded-lg object-cover shrink-0"
-                      />
-                      <div className="flex-1 min-w-0">
-                        <p className="text-[10.5px] text-[#F3DCB3] capitalize">
-                          {draft.type} · {draft.category} · Ep {draft.episodeNumber}
-                        </p>
-                        <h3 className="font-literary text-sm font-semibold text-white truncate">
-                          {draft.title}
-                        </h3>
-                        <p className="text-[11px] text-white/60 tabular-nums">
-                          {pgCount} {pgCount === 1 ? 'Page' : 'Pages'}
-                        </p>
-                        <div className="flex items-center gap-1.5 mt-2">
-                          <button
-                            type="button"
-                            onClick={() => handleLoadDraft(draft)}
-                            className="px-2.5 py-1 rounded-full bg-white/10 text-[11px] text-white hover:bg-white/20"
-                          >
-                            Edit
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => onPreviewDraft(draft)}
-                            className="px-2.5 py-1 rounded-full bg-white/10 text-[11px] text-[#F3DCB3] hover:bg-white/20"
-                          >
-                            Preview
-                          </button>
-                          <button
-                            type="button"
-                            disabled={isPublishing}
-                            onClick={async () => {
-                              setIsPublishing(true);
-                              try {
-                                await onPublishWork({
-                                  draftId: draft.id,
-                                  targetWorkId: draft.targetWorkId,
-                                  editingEpisodeId: draft.editingEpisodeId,
-                                  type: draft.type,
-                                  category: draft.category,
-                                  coverUrl: draft.coverUrl,
-                                  description: draft.description,
-                                  title: draft.title,
-                                  episodeTitle: draft.title,
-                                  episodeNumber: draft.episodeNumber,
-                                  rawContent: draft.rawContent,
-                                });
-                                setShowDraftsModal(false);
-                              } catch (err) {
-                                setErrorMessage(
-                                  err instanceof Error
-                                    ? err.message
-                                    : 'Failed to publish draft.',
-                                );
-                              } finally {
-                                setIsPublishing(false);
-                              }
-                            }}
-                            className="px-2.5 py-1 rounded-full bg-[#F3DCB3] text-[#1A1033] text-[11px] font-semibold disabled:opacity-60"
-                          >
-                            {isPublishing ? '...' : 'Publish'}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => onDeleteDraft(draft.id)}
-                            aria-label="Delete draft"
-                            className="ml-auto p-1.5 rounded-full text-rose-300 hover:bg-rose-500/20"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
+              {/* Scrollable Drafts List */}
+              <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3 pb-6 space-y-3">
+                {drafts.length === 0 ? (
+                  <p className="text-center text-xs text-white/65 py-10">
+                    No saved drafts yet. Write content and tap “Save to Drafts”.
+                  </p>
+                ) : (
+                  drafts.map((draft) => {
+                    const pgCount = splitPages(draft.rawContent).length;
+                    return (
+                      <div
+                        key={draft.id}
+                        className="rounded-2xl bg-white/[0.06] border border-white/12 p-3 flex gap-3"
+                      >
+                        <img
+                          src={draft.coverUrl}
+                          alt={draft.title}
+                          className="w-14 aspect-[2/3] rounded-lg object-cover shrink-0 border border-white/10"
+                        />
+                        <div className="flex-1 min-w-0">
+                          <p className="text-[10.5px] text-[#F3DCB3] capitalize">
+                            {draft.type} · {draft.category} · Ep {draft.episodeNumber}
+                          </p>
+                          <h3 className="font-literary text-sm font-semibold text-white truncate mt-0.5">
+                            {draft.title}
+                          </h3>
+                          <p className="text-[11px] text-white/60 tabular-nums">
+                            {pgCount} {pgCount === 1 ? 'Page' : 'Pages'}
+                          </p>
+                          <div className="flex flex-wrap items-center gap-1.5 mt-2.5">
+                            <button
+                              type="button"
+                              onClick={() => handleLoadDraft(draft)}
+                              className="min-h-[34px] px-3 rounded-full bg-white/12 text-[11.5px] font-medium text-white hover:bg-white/20 active:scale-95 transition"
+                            >
+                              Edit
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => onPreviewDraft(draft)}
+                              className="min-h-[34px] px-3 rounded-full bg-white/12 text-[11.5px] font-medium text-[#F3DCB3] hover:bg-white/20 active:scale-95 transition"
+                            >
+                              Preview
+                            </button>
+                            <button
+                              type="button"
+                              disabled={isPublishing}
+                              onClick={async () => {
+                                setIsPublishing(true);
+                                try {
+                                  await onPublishWork({
+                                    draftId: draft.id,
+                                    targetWorkId: draft.targetWorkId,
+                                    editingEpisodeId: draft.editingEpisodeId,
+                                    type: draft.type,
+                                    category: draft.category,
+                                    coverUrl: draft.coverUrl,
+                                    description: draft.description,
+                                    title: draft.title,
+                                    episodeTitle: draft.title,
+                                    episodeNumber: draft.episodeNumber,
+                                    rawContent: draft.rawContent,
+                                  });
+                                  closeDraftsModal();
+                                } catch (err) {
+                                  setErrorMessage(
+                                    err instanceof Error
+                                      ? err.message
+                                      : 'Failed to publish draft.',
+                                  );
+                                } finally {
+                                  setIsPublishing(false);
+                                }
+                              }}
+                              className="min-h-[34px] px-3.5 rounded-full bg-[#F3DCB3] text-[#1A1033] text-[11.5px] font-bold hover:brightness-105 active:scale-95 transition disabled:opacity-60"
+                            >
+                              {isPublishing ? '...' : 'Publish'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => onDeleteDraft(draft.id)}
+                              aria-label="Delete draft"
+                              className="ml-auto min-w-[34px] min-h-[34px] rounded-full text-rose-300 bg-rose-500/10 hover:bg-rose-500/20 flex items-center justify-center active:scale-95 transition"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  );
-                })
-              )}
+                    );
+                  })
+                )}
+              </div>
             </div>
-          </div>
-        </div>
-      )}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }

@@ -1,7 +1,5 @@
-const CACHE_NAME = 'aynora-universe-v1';
+const CACHE_NAME = 'aynora-universe-v2';
 const CORE_ASSETS = [
-  './',
-  './index.html',
   './manifest.json',
   './pwa-192x192.png',
   './pwa-512x512.png',
@@ -63,22 +61,18 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Same-origin static assets: stale-while-revalidate for fast startup
+  // Same-origin static assets: network-first so new deployments appear immediately
   if (url.origin === self.location.origin) {
     event.respondWith(
-      caches.match(request).then((cached) => {
-        const networkFetch = fetch(request)
-          .then((response) => {
-            if (response && response.status === 200) {
-              const copy = response.clone();
-              caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
-            }
-            return response;
-          })
-          .catch(() => cached);
-
-        return cached || networkFetch;
-      }),
+      fetch(request)
+        .then((response) => {
+          if (response && response.status === 200) {
+            const copy = response.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
+          }
+          return response;
+        })
+        .catch(() => caches.match(request)),
     );
   }
 });
